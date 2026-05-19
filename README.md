@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # TelurKu Railway Scheduler
 
 Worker Node.js untuk menjalankan penjadwalan panen otomatis di Railway.
@@ -87,3 +88,7 @@ Setelah jadwal sore berhasil dieksekusi, worker akan me-reset:
 - `data/infra2 = 0`
 
 Ringkasan harian di `riwayat/summary` tetap disimpan untuk kebutuhan tampilan Flutter.
+=======
+# lurtelurku_backend
+Deployment project for Railway
+>>>>>>> 6d5419d62de4e76250a0a5160a8d0820de478a16

@@ -717,6 +717,17 @@ async function bootstrap() {
   cron.schedule(
     '* * * * *',
     async () => {
+      try {
+        await runTick();
+      } catch (e) {
+        console.error('[error] Tick failed:', e.message);
+      }
+    },
+    { timezone: TZ },
+  );
+
+  console.log(`[init] Scheduler active (timezone=${TZ})`);
+}
 
 bootstrap().catch((e) => {
   console.error('[fatal] bootstrap failed:', e.message);

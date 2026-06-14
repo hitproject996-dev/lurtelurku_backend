@@ -12,13 +12,15 @@ const SCHEDULER_RUNS_RETAIN_DAYS = Number(process.env.SCHEDULER_RUNS_RETAIN_DAYS
 
 function getEnvOrThrow(key) {
   const value = process.env[key];
-  if (!value) throw new Error(`Missing env var: ${key}`);
+  if (!value) {
+    throw new Error(`Missing env var: ${key}`);
+  }
   return value;
 }
 
+// PERBAIKAN:
 function parseServiceAccountFromEnv() {
   const rawJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-
   if (rawJson) {
     const parsed = JSON.parse(rawJson);
     return {
@@ -28,6 +30,7 @@ function parseServiceAccountFromEnv() {
     };
   }
 
+  // Panggil NAMA VARIABEL yang didaftarkan di Railway
   return {
     projectId: getEnvOrThrow('FIREBASE_PROJECT_ID'),
     clientEmail: getEnvOrThrow('FIREBASE_CLIENT_EMAIL'),
@@ -37,6 +40,7 @@ function parseServiceAccountFromEnv() {
 
 function initFirebase() {
   const { projectId, clientEmail, privateKey } = parseServiceAccountFromEnv();
+  // Panggil NAMA VARIABEL untuk URL database
   const databaseURL = getEnvOrThrow('FIREBASE_DATABASE_URL');
 
   admin.initializeApp({
@@ -68,7 +72,7 @@ function formatHHMM(date) {
 
 function toInt(value) {
   const n = Number(value);
-  return Number.isFinite(n) ? Math.floor(n) : 0;
+  return Number.isFinite(n) ? n : 0;
 }
 
 function toDate(value) {
@@ -109,7 +113,6 @@ function parseDurasiMs(durasiRaw) {
 function isAllKandangSchedule(jadwal) {
   const kandangId = String(jadwal.kandangId || '').toLowerCase().trim();
   const kandangNama = String(jadwal.kandangNama || '').toLowerCase().trim();
-
   return (
     kandangId === 'all' ||
     kandangId === 'global' ||
@@ -132,8 +135,18 @@ function resolveTargetKandangIds(jadwal, kandangMap) {
   return [kandangId];
 }
 
-function detectJenisPanen(jadwalOrder) {
-  return jadwalOrder === 0 ? 'pagi' : 'sore';
+function detectJenisPanen(jadwal, jadwalOrder) {
+  // jadwalOrder 0 = urutan pertama = PAGI
+  // jadwalOrder 1+ = urutan selanjutnya = SORE (atau sesuai jam)
+  if (jadwalOrder === 0) {
+    return 'pagi';
+  }
+  
+  // Untuk jadwal ke-2+, check jam: < 12 = pagi, >= 12 = sore
+  const jam = String(jadwal.jam || '09:00');
+  const hour = Number(jam.split(':')[0] || 9);
+  
+  return hour < 12 ? 'pagi' : 'sore';
 }
 
 function resolveInfraPath(kandangId, kandangData) {
@@ -149,9 +162,8 @@ function resolveInfraPath(kandangId, kandangData) {
 
 async function acquireRunLock(todayKey, lockKey) {
   const lockRef = admin.database().ref(`scheduler_runs/${todayKey}/${lockKey}`);
-
   const tx = await lockRef.transaction((current) => {
-    if (current) return;
+    if (current) return current;
     return {
       executedAt: new Date().toISOString(),
       source: 'railway-scheduler',
@@ -199,12 +211,11 @@ async function updateRiwayatSummary({ kandangId, kandangNama, jumlahTelur, dateK
   });
 }
 
-async function resetSensorAfterLastHarvest(todayKey) {
-  const lockKey = 'last_harvest_sensor_reset';
+async function resetSensorAfterEvening(todayKey) {
+  const lockKey = 'evening_sensor_reset';
   const gotLock = await acquireRunLock(todayKey, lockKey);
-
   if (!gotLock) {
-    console.log('[skip] Reset sensor sudah pernah dilakukan hari ini');
+    console.log('[skip] Sensor reset sudah dieksekusi hari ini');
     return;
   }
 
@@ -214,9 +225,7 @@ async function resetSensorAfterLastHarvest(todayKey) {
     last_reset_by_scheduler: new Date().toISOString(),
   });
 
-  await admin.database().ref(`panen_snapshot/${todayKey}`).remove();
-
-  console.log('[ok] Sensor infra1/infra2 dan snapshot panen berhasil di-reset');
+  console.log('[ok] Sensor infra1/infra2 di-reset otomatis setelah jadwal sore');
 }
 
 async function writeRiwayat({
@@ -232,41 +241,40 @@ async function writeRiwayat({
 }) {
   const riwayatRef = admin.database().ref('riwayat/records').push();
   const now = new Date();
+  const jumlah = toInt(jumlahTelur);
+  const sensor = toInt(sensorSnapshot);
 
   await riwayatRef.set({
     id: `railway_${Date.now()}`,
     kandang_id: kandangId,
     kandang_nama: kandangNama,
-    jumlah_telur: toInt(jumlahTelur),
+    jumlah_telur: jumlah,
     tanggal_panen: now.toISOString(),
     jam,
     jenis_panen: jenisPanen,
-    sensor_snapshot: toInt(sensorSnapshot),
-    panen_sebelumnya: panenSebelumnya == null ? null : toInt(panenSebelumnya),
+    sensor_snapshot: sensor,
+    panen_sebelumnya: panenSebelumnya == null ? null : Number(panenSebelumnya),
     catatan,
   });
 
   await updateRiwayatSummary({
     kandangId,
     kandangNama,
-    jumlahTelur,
+    jumlahTelur: jumlah,
     dateKey,
   });
 }
 
 async function shouldRunMaintenance() {
   const lockRef = admin.database().ref('maintenance/migration_v2_global_alias');
-
   const tx = await lockRef.transaction((current) => {
     if (current && current.done === true) return current;
-
     return {
       done: true,
       done_at: new Date().toISOString(),
       source: 'railway-scheduler',
     };
   });
-
   return tx.committed;
 }
 
@@ -277,12 +285,10 @@ function looksLikeLegacyRecord(value) {
 
 function buildKandangNameMap(kandangMap) {
   const map = {};
-
   for (const kandangId of Object.keys(kandangMap || {})) {
     const kandang = kandangMap[kandangId];
     map[kandangId] = String((kandang && kandang.nama) || kandangId);
   }
-
   return map;
 }
 
@@ -298,32 +304,22 @@ async function inferTargetForGlobalRecord(record, kandangMap) {
 
   const jenis = String(record.jenis_panen || '').toLowerCase();
   const sessionKey = jenis === 'sore' ? 'sore' : 'pagi';
-
-  const sessionSnap = await admin.database().ref(`panen_snapshot/${dateKey}/${sessionKey}`).get();
+  const sessionSnapRef = admin.database().ref(`panen_snapshot/${dateKey}/${sessionKey}`);
+  const sessionSnap = await sessionSnapRef.get();
   if (!sessionSnap.exists() || typeof sessionSnap.val() !== 'object') return null;
 
   const snapData = sessionSnap.val();
   const candidates = [];
-
   for (const kandangId of Object.keys(kandangMap || {})) {
     if (!Object.prototype.hasOwnProperty.call(snapData, kandangId)) continue;
-
     const snapVal = toInt(snapData[kandangId]);
-
     if (jenis === 'sore') {
       const deltaKey = `delta_${kandangId}`;
       const deltaVal = toInt(snapData[deltaKey]);
-
-      if (
-        deltaVal === toInt(record.jumlah_telur) ||
-        snapVal === toInt(record.sensor_snapshot)
-      ) {
+      if (deltaVal === toInt(record.jumlah_telur) || snapVal === toInt(record.sensor_snapshot)) {
         candidates.push(kandangId);
       }
-    } else if (
-      snapVal === toInt(record.sensor_snapshot) ||
-      snapVal === toInt(record.jumlah_telur)
-    ) {
+    } else if (snapVal === toInt(record.sensor_snapshot) || snapVal === toInt(record.jumlah_telur)) {
       candidates.push(kandangId);
     }
   }
@@ -334,8 +330,9 @@ async function inferTargetForGlobalRecord(record, kandangMap) {
 async function migrateLegacyRiwayatData(kandangMap) {
   const riwayatRef = admin.database().ref('riwayat');
   const rootSnap = await riwayatRef.get();
-
-  if (!rootSnap.exists() || typeof rootSnap.val() !== 'object') return;
+  if (!rootSnap.exists() || typeof rootSnap.val() !== 'object') {
+    return;
+  }
 
   const root = rootSnap.val();
   const recordsRef = admin.database().ref('riwayat/records');
@@ -358,8 +355,8 @@ async function migrateLegacyRiwayatData(kandangMap) {
 
   for (const [legacyKey, value] of Object.entries(root)) {
     if (legacyKey === 'records' || legacyKey === 'summary') continue;
-
     if (!looksLikeLegacyRecord(value)) {
+      // Hapus field summary lama atau node lama non-record.
       cleanupUpdates[legacyKey] = null;
       continue;
     }
@@ -367,7 +364,6 @@ async function migrateLegacyRiwayatData(kandangMap) {
     const record = { ...value };
     const kandangIdRaw = String(record.kandang_id || '').toLowerCase();
     const kandangNamaRaw = String(record.kandang_nama || '').toLowerCase();
-
     const isGlobal =
       kandangIdRaw === 'global' ||
       kandangIdRaw === 'all' ||
@@ -382,13 +378,11 @@ async function migrateLegacyRiwayatData(kandangMap) {
         migrated_from_legacy: true,
         migrated_at: new Date().toISOString(),
       });
-
       cleanupUpdates[legacyKey] = null;
       continue;
     }
-
+ 
     const inferredKandangId = await inferTargetForGlobalRecord(record, kandangMap);
-
     if (inferredKandangId) {
       await recordsRef.push().set({
         ...record,
@@ -397,11 +391,11 @@ async function migrateLegacyRiwayatData(kandangMap) {
         migrated_from_global: true,
         migrated_at: new Date().toISOString(),
       });
-
       cleanupUpdates[legacyKey] = null;
       continue;
     }
 
+    // Fallback: jika tidak bisa infer unik, split ke semua kandang aktif.
     const kandangIds = Object.keys(kandangMap || {});
     if (kandangIds.length === 0) {
       cleanupUpdates[legacyKey] = null;
@@ -437,7 +431,6 @@ async function migrateLegacyRiwayatData(kandangMap) {
 async function normalizeRecordsNode() {
   const nestedRef = admin.database().ref('riwayat/records/records');
   const nestedSnap = await nestedRef.get();
-
   if (!nestedSnap.exists() || typeof nestedSnap.val() !== 'object') return;
 
   const recordsRef = admin.database().ref('riwayat/records');
@@ -449,7 +442,6 @@ async function normalizeRecordsNode() {
   }
 
   await nestedRef.remove();
-
   console.log('[maintenance] Flattened riwayat/records/records into riwayat/records');
 }
 
@@ -458,11 +450,9 @@ async function pruneOldRiwayatRecords(maxRecords) {
 
   const recordsRef = admin.database().ref('riwayat/records');
   const snap = await recordsRef.get();
-
   if (!snap.exists() || typeof snap.val() !== 'object') return;
 
   const recordsData = snap.val();
-
   const entries = Object.entries(recordsData)
     .filter(([_, value]) => value && typeof value === 'object')
     .map(([key, value]) => {
@@ -474,14 +464,12 @@ async function pruneOldRiwayatRecords(maxRecords) {
   if (entries.length <= maxRecords) return;
 
   const removeUpdates = {};
-
   for (const item of entries.slice(maxRecords)) {
     removeUpdates[item.key] = null;
   }
 
   await recordsRef.update(removeUpdates);
-
-  console.log(`[maintenance] Pruned ${entries.length - maxRecords} old riwayat records`);
+  console.log(`[maintenance] Pruned ${entries.length - maxRecords} old riwayat records (keep ${maxRecords})`);
 }
 
 async function pruneOldSchedulerRuns(retainDays) {
@@ -489,7 +477,6 @@ async function pruneOldSchedulerRuns(retainDays) {
 
   const runsRef = admin.database().ref('scheduler_runs');
   const snap = await runsRef.get();
-
   if (!snap.exists() || typeof snap.val() !== 'object') return;
 
   const runs = snap.val();
@@ -500,7 +487,6 @@ async function pruneOldSchedulerRuns(retainDays) {
   for (const dateKey of Object.keys(runs)) {
     const date = toDate(`${dateKey}T00:00:00+07:00`);
     if (!date) continue;
-
     if (date < cutoff) {
       removeUpdates[dateKey] = null;
     }
@@ -518,41 +504,15 @@ async function runCompactMaintenance() {
   await pruneOldSchedulerRuns(SCHEDULER_RUNS_RETAIN_DAYS);
 }
 
-async function getPreviousHarvestValue(todayKey, kandangId) {
-  const latestSnapRef = admin.database().ref(`panen_snapshot/${todayKey}/latest/${kandangId}`);
-  const latestSnap = await latestSnapRef.get();
-
-  if (latestSnap.exists()) {
-    return {
-      value: toInt(latestSnap.val()),
-      source: 'panen_sebelumnya',
-    };
-  }
-
-  return {
-    value: 0,
-    source: 'belum_ada_panen_sebelumnya',
-  };
-}
-
-async function updateHarvestSnapshot(todayKey, kandangId, sensorValue, delta, jenisPanen) {
-  const updates = {};
-
-  updates[`panen_snapshot/${todayKey}/latest/${kandangId}`] = toInt(sensorValue);
-  updates[`panen_snapshot/${todayKey}/${jenisPanen}/${kandangId}`] = toInt(sensorValue);
-  updates[`panen_snapshot/${todayKey}/${jenisPanen}/delta_${kandangId}`] = toInt(delta);
-  updates[`panen_snapshot/${todayKey}/${jenisPanen}/timestamp`] = new Date().toISOString();
-
-  await admin.database().ref().update(updates);
-}
-
-async function runForSchedule(jadwalId, jadwal, dataSensor, kandangMap, todayKey, jadwalOrder) {
-  const jam = String(jadwal.jam || '09:00').slice(0, 5);
-  const jenisPanen = detectJenisPanen(jadwalOrder);
+async function runForSchedule(jadwalId, jadwal, dataSensor, kandangMap, todayKey, jadwalOrder, totalJadwal) {
+  const jam = String(jadwal.jam || '09:00');
+  const jenisPanen = detectJenisPanen(jadwal, jadwalOrder);
   const durasiMs = parseDurasiMs(jadwal.durasi);
 
   console.log(
-    `[info] ${jadwalId}: jadwal panen ${jenisPanen}, durasi ${Math.round(durasiMs / 1000)} detik`,
+    `[info] ${jadwalId}: trigger motor dilewati di worker (durasi jadwal ${Math.round(
+      durasiMs / 1000,
+    )} detik), aktuator dikendalikan EPS/main.cpp`,
   );
 
   const targetKandangIds = resolveTargetKandangIds(jadwal, kandangMap);
@@ -563,11 +523,10 @@ async function runForSchedule(jadwalId, jadwal, dataSensor, kandangMap, todayKey
   }
 
   for (const kandangId of targetKandangIds) {
-    const lockKey = `${jadwalId}_${kandangId}`;
+    const lockKey = `${jenisPanen}_${kandangId}`;
     const gotLock = await acquireRunLock(todayKey, lockKey);
-
     if (!gotLock) {
-      console.log(`[skip] ${jadwalId}/${kandangId}: sudah dieksekusi hari ini`);
+      console.log(`[skip] ${jadwalId}/${kandangId}: slot ${jenisPanen} sudah dieksekusi hari ini`);
       continue;
     }
 
@@ -575,47 +534,62 @@ async function runForSchedule(jadwalId, jadwal, dataSensor, kandangMap, todayKey
     const kandangNama = String(
       (kandangData && kandangData.nama) || jadwal.kandangNama || kandangId || 'Kandang',
     );
-
     const infraPath = resolveInfraPath(kandangId, kandangData);
-    const sensorValue = toInt(dataSensor[infraPath]);
+    const sensorValue = Number(dataSensor[infraPath] || 0);
 
-    const previous = await getPreviousHarvestValue(todayKey, kandangId);
-    const nilaiSebelumnya = previous.value;
+    if (jenisPanen === 'pagi') {
+      await admin.database().ref(`panen_snapshot/${todayKey}/pagi`).update({
+        [kandangId]: sensorValue,
+        timestamp: new Date().toISOString(),
+      });
 
-    let jumlahTelur;
+      await writeRiwayat({
+        kandangId,
+        kandangNama,
+        jumlahTelur: sensorValue,
+        jam,
+        jenisPanen: 'pagi',
+        sensorSnapshot: sensorValue,
+        panenSebelumnya: null,
+        catatan: 'Auto-capture PAGI dari Railway scheduler',
+        dateKey: todayKey,
+      });
 
-    if (jadwalOrder === 0) {
-      jumlahTelur = sensorValue;
-    } else {
-      jumlahTelur = Math.max(sensorValue - nilaiSebelumnya, 0);
+      console.log(`[ok] Pagi ${kandangNama}: ${sensorValue} telur (${infraPath})`);
+      continue;
     }
 
-    await updateHarvestSnapshot(
-      todayKey,
-      kandangId,
-      sensorValue,
-      jumlahTelur,
-      jenisPanen,
-    );
+    const pagiSnapRef = admin.database().ref(`panen_snapshot/${todayKey}/pagi/${kandangId}`);
+    const pagiSnap = await pagiSnapRef.get();
+    const nilaiPagi = pagiSnap.exists() ? Number(pagiSnap.val() || 0) : 0;
+    const delta = Math.max(sensorValue - nilaiPagi, 0);
+
+    await admin.database().ref(`panen_snapshot/${todayKey}/sore`).update({
+      [kandangId]: sensorValue,
+      [`delta_${kandangId}`]: delta,
+      timestamp: new Date().toISOString(),
+    });
 
     await writeRiwayat({
       kandangId,
       kandangNama,
-      jumlahTelur,
+      jumlahTelur: delta,
       jam,
-      jenisPanen,
+      jenisPanen: 'sore',
       sensorSnapshot: sensorValue,
-      panenSebelumnya: jadwalOrder === 0 ? null : nilaiSebelumnya,
-      catatan:
-        jadwalOrder === 0
-          ? `Auto-capture PANEN 1/PAGI dari Railway scheduler. Sensor ${infraPath}=${sensorValue}`
-          : `Auto-capture PANEN LANJUTAN dari Railway scheduler. Delta: ${sensorValue} - ${nilaiSebelumnya}. Baseline: ${previous.source}`,
+      panenSebelumnya: nilaiPagi,
+      catatan: `Auto-capture SORE dari Railway scheduler (delta: ${sensorValue} - ${nilaiPagi})`,
       dateKey: todayKey,
     });
 
-    console.log(
-      `[ok] ${jadwalId}/${kandangNama}: sensor=${sensorValue}, sebelumnya=${nilaiSebelumnya}, hasil=${jumlahTelur}, jenis=${jenisPanen}`,
-    );
+    console.log(`[ok] Sore ${kandangNama}: ${delta} telur (${sensorValue}-${nilaiPagi})`);
+  }
+
+  // Jika ini jadwal terakhir, reset snapshot untuk hari ini
+  if (jadwalOrder === totalJadwal - 1) {
+    const snapshotRef = admin.database().ref(`panen_snapshot/${todayKey}`);
+    await snapshotRef.remove();
+    console.log(`[ok] Reset snapshot panen untuk hari ${todayKey} (jadwal terakhir selesai)`);
   }
 }
 
@@ -625,7 +599,6 @@ async function runTick() {
   const todayKey = formatDateKey(now);
 
   const db = admin.database();
-
   const [jadwalSnap, dataSnap, kandangSnap] = await Promise.all([
     db.ref('kontrol/penjadwalan').get(),
     db.ref('data').get(),
@@ -641,70 +614,48 @@ async function runTick() {
   const dataSensor = dataSnap.exists() ? dataSnap.val() : {};
   const kandangMap = kandangSnap.exists() ? kandangSnap.val() : {};
 
+  // Sort jadwal by ID untuk menentukan urutan: penjadwalan1 = pagi, penjadwalan2+ = sore
   const sortedJadwals = Object.entries(jadwalMap)
     .map(([id, jadwal]) => [id, jadwal])
     .sort((a, b) => {
-      const numA = parseInt(String(a[0]).replace('penjadwalan', ''), 10) || 999;
-      const numB = parseInt(String(b[0]).replace('penjadwalan', ''), 10) || 999;
+      const numA = parseInt(a[0].replace('penjadwalan', '')) || 999;
+      const numB = parseInt(b[0].replace('penjadwalan', '')) || 999;
       return numA - numB;
     });
 
-  const semuaJadwalAktif = sortedJadwals.filter(([_, jadwal]) => {
-    return jadwal && jadwal.aktif === true;
-  });
-
-  if (semuaJadwalAktif.length === 0) {
-    console.log(`[tick] ${nowHHMM} tidak ada jadwal aktif`);
-    return;
-  }
-
+  // Map untuk deteksi urutan
   const jadwalOrderMap = {};
-
-  semuaJadwalAktif.forEach(([id], index) => {
+  sortedJadwals.forEach(([id, jadwal], index) => {
     jadwalOrderMap[id] = index;
   });
 
-  const aktifSekarang = semuaJadwalAktif.filter(([_, jadwal]) => {
+  const aktifSekarang = sortedJadwals.filter(([_, jadwal]) => {
+    if (!jadwal || jadwal.aktif !== true) return false;
     const jam = String(jadwal.jam || '').slice(0, 5);
     return jam === nowHHMM;
   });
 
   if (aktifSekarang.length === 0) {
-    console.log(`[tick] ${nowHHMM} tidak ada jadwal yang cocok`);
+    console.log(`[tick] ${nowHHMM} tidak ada jadwal aktif`);
     return;
   }
 
-  const maxOrderSemuaAktif = semuaJadwalAktif.length - 1;
-  const maxActiveOrder = Math.max(...aktifSekarang.map(([id]) => jadwalOrderMap[id]));
-  const isLastScheduleOfDay = maxActiveOrder === maxOrderSemuaAktif;
-
-  console.log(
-    `[tick] ${nowHHMM} eksekusi ${aktifSekarang.length} jadwal. order=${maxActiveOrder}, last=${isLastScheduleOfDay}`,
-  );
-
-  let hasHarvestRun = false;
+  console.log(`[tick] ${nowHHMM} eksekusi ${aktifSekarang.length} jadwal`);
+  let hasEveningRun = false;
 
   for (const [jadwalId, jadwal] of aktifSekarang) {
     try {
-      await runForSchedule(
-        jadwalId,
-        jadwal,
-        dataSensor,
-        kandangMap,
-        todayKey,
-        jadwalOrderMap[jadwalId],
-      );
-
-      hasHarvestRun = true;
+      await runForSchedule(jadwalId, jadwal, dataSensor, kandangMap, todayKey, jadwalOrderMap[jadwalId], sortedJadwals.length);
+      if (detectJenisPanen(jadwal, jadwalOrderMap[jadwalId]) === 'sore') {
+        hasEveningRun = true;
+      }
     } catch (e) {
       console.error(`[error] Jadwal ${jadwalId} gagal:`, e.message);
     }
   }
 
-  if (hasHarvestRun && isLastScheduleOfDay) {
-    await resetSensorAfterLastHarvest(todayKey);
-  } else if (hasHarvestRun && !isLastScheduleOfDay) {
-    console.log('[skip] Reset ditunda karena belum jadwal panen terakhir hari ini');
+  if (hasEveningRun) {
+    await resetSensorAfterEvening(todayKey);
   }
 }
 
@@ -712,13 +663,7 @@ function startHealthServer() {
   const server = http.createServer((req, res) => {
     if (req.url === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(
-        JSON.stringify({
-          ok: true,
-          service: 'telurku-railway-scheduler',
-          timezone: TZ,
-        }),
-      );
+      res.end(JSON.stringify({ ok: true, service: 'telurku-railway-scheduler' }));
       return;
     }
 
@@ -739,7 +684,6 @@ async function bootstrap() {
   const kandangMap = kandangSnap.exists() ? kandangSnap.val() : {};
 
   const runMaintenance = await shouldRunMaintenance();
-
   if (runMaintenance) {
     try {
       await migrateLegacyRiwayatData(kandangMap);
@@ -763,6 +707,7 @@ async function bootstrap() {
     return;
   }
 
+  // Run once at startup for visibility, then every minute.
   try {
     await runTick();
   } catch (e) {
@@ -772,17 +717,6 @@ async function bootstrap() {
   cron.schedule(
     '* * * * *',
     async () => {
-      try {
-        await runTick();
-      } catch (e) {
-        console.error('[error] Tick failed:', e.message);
-      }
-    },
-    { timezone: TZ },
-  );
-
-  console.log(`[init] Scheduler active timezone=${TZ}`);
-}
 
 bootstrap().catch((e) => {
   console.error('[fatal] bootstrap failed:', e.message);

@@ -641,6 +641,11 @@ async function runTick() {
   }
 
   console.log(`[tick] ${nowHHMM} eksekusi ${aktifSekarang.length} jadwal`);
+
+  // Cari jadwal aktif dengan order tertinggi (paling akhir di hari ini)
+  const maxActiveOrder = Math.max(...aktifSekarang.map(([id]) => jadwalOrderMap[id]));
+  const isLastScheduleOfDay = maxActiveOrder === sortedJadwals.length - 1;
+
   let hasEveningRun = false;
 
   for (const [jadwalId, jadwal] of aktifSekarang) {
@@ -654,8 +659,11 @@ async function runTick() {
     }
   }
 
-  if (hasEveningRun) {
+  // Reset sensor HANYA jika yang jalan sekarang adalah jadwal TERAKHIR dari hari ini
+  if (hasEveningRun && isLastScheduleOfDay) {
     await resetSensorAfterEvening(todayKey);
+  } else if (hasEveningRun && !isLastScheduleOfDay) {
+    console.log(`[skip] Reset sensor ditunda — jadwal aktif sekarang bukan jadwal terakhir (order ${maxActiveOrder} dari ${sortedJadwals.length - 1})`);
   }
 }
 

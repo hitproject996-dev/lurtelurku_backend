@@ -135,10 +135,17 @@ function resolveTargetKandangIds(jadwal, kandangMap) {
   return [kandangId];
 }
 
-function detectJenisPanen(jadwal) {
+function detectJenisPanen(jadwal, jadwalOrder) {
+  // jadwalOrder 0 = urutan pertama = PAGI
+  // jadwalOrder 1+ = urutan selanjutnya = SORE (atau sesuai jam)
+  if (jadwalOrder === 0) {
+    return 'pagi';
+  }
+  
+  // Untuk jadwal ke-2+, check jam: < 12 = pagi, >= 12 = sore
   const jam = String(jadwal.jam || '09:00');
   const hour = Number(jam.split(':')[0] || 9);
-
+  
   return hour < 12 ? 'pagi' : 'sore';
 }
 
@@ -374,7 +381,7 @@ async function migrateLegacyRiwayatData(kandangMap) {
       cleanupUpdates[legacyKey] = null;
       continue;
     }
-
+ 
     const inferredKandangId = await inferTargetForGlobalRecord(record, kandangMap);
     if (inferredKandangId) {
       await recordsRef.push().set({
@@ -497,9 +504,9 @@ async function runCompactMaintenance() {
   await pruneOldSchedulerRuns(SCHEDULER_RUNS_RETAIN_DAYS);
 }
 
-async function runForSchedule(jadwalId, jadwal, dataSensor, kandangMap, todayKey) {
+async function runForSchedule(jadwalId, jadwal, dataSensor, kandangMap, todayKey, jadwalOrder, totalJadwal) {
   const jam = String(jadwal.jam || '09:00');
-  const jenisPanen = detectJenisPanen(jadwal);
+  const jenisPanen = detectJenisPanen(jadwal, jadwalOrder);
   const durasiMs = parseDurasiMs(jadwal.durasi);
 
   console.log(
@@ -577,6 +584,13 @@ async function runForSchedule(jadwalId, jadwal, dataSensor, kandangMap, todayKey
 
     console.log(`[ok] Sore ${kandangNama}: ${delta} telur (${sensorValue}-${nilaiPagi})`);
   }
+
+  // Jika ini jadwal terakhir, reset snapshot untuk hari ini
+  if (jadwalOrder === totalJadwal - 1) {
+    const snapshotRef = admin.database().ref(`panen_snapshot/${todayKey}`);
+    await snapshotRef.remove();
+    console.log(`[ok] Reset snapshot panen untuk hari ${todayKey} (jadwal terakhir selesai)`);
+  }
 }
 
 async function runTick() {
@@ -600,7 +614,22 @@ async function runTick() {
   const dataSensor = dataSnap.exists() ? dataSnap.val() : {};
   const kandangMap = kandangSnap.exists() ? kandangSnap.val() : {};
 
-  const aktifSekarang = Object.entries(jadwalMap).filter(([_, jadwal]) => {
+  // Sort jadwal by ID untuk menentukan urutan: penjadwalan1 = pagi, penjadwalan2+ = sore
+  const sortedJadwals = Object.entries(jadwalMap)
+    .map(([id, jadwal]) => [id, jadwal])
+    .sort((a, b) => {
+      const numA = parseInt(a[0].replace('penjadwalan', '')) || 999;
+      const numB = parseInt(b[0].replace('penjadwalan', '')) || 999;
+      return numA - numB;
+    });
+
+  // Map untuk deteksi urutan
+  const jadwalOrderMap = {};
+  sortedJadwals.forEach(([id, jadwal], index) => {
+    jadwalOrderMap[id] = index;
+  });
+
+  const aktifSekarang = sortedJadwals.filter(([_, jadwal]) => {
     if (!jadwal || jadwal.aktif !== true) return false;
     const jam = String(jadwal.jam || '').slice(0, 5);
     return jam === nowHHMM;
@@ -616,8 +645,8 @@ async function runTick() {
 
   for (const [jadwalId, jadwal] of aktifSekarang) {
     try {
-      await runForSchedule(jadwalId, jadwal, dataSensor, kandangMap, todayKey);
-      if (detectJenisPanen(jadwal) === 'sore') {
+      await runForSchedule(jadwalId, jadwal, dataSensor, kandangMap, todayKey, jadwalOrderMap[jadwalId], sortedJadwals.length);
+      if (detectJenisPanen(jadwal, jadwalOrderMap[jadwalId]) === 'sore') {
         hasEveningRun = true;
       }
     } catch (e) {

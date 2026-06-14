@@ -585,12 +585,9 @@ async function runForSchedule(jadwalId, jadwal, dataSensor, kandangMap, todayKey
     console.log(`[ok] Sore ${kandangNama}: ${delta} telur (${sensorValue}-${nilaiPagi})`);
   }
 
-  // Jika ini jadwal terakhir, reset snapshot untuk hari ini
-  if (jadwalOrder === totalJadwal - 1) {
-    const snapshotRef = admin.database().ref(`panen_snapshot/${todayKey}`);
-    await snapshotRef.remove();
-    console.log(`[ok] Reset snapshot panen untuk hari ${todayKey} (jadwal terakhir selesai)`);
-  }
+  // Catatan: reset snapshot TIDAK dilakukan di sini.
+  // Reset dilakukan di runTick() setelah SEMUA jadwal aktif selesai dieksekusi,
+  // agar snapshot pagi tetap tersedia saat kandang lain menghitung delta sore.
 }
 
 async function runTick() {
@@ -662,8 +659,12 @@ async function runTick() {
   // Reset sensor HANYA jika yang jalan sekarang adalah jadwal TERAKHIR dari hari ini
   if (hasEveningRun && isLastScheduleOfDay) {
     await resetSensorAfterEvening(todayKey);
+    // Hapus snapshot panen setelah SEMUA jadwal selesai (aman karena semua delta sudah dihitung)
+    const snapshotRef = admin.database().ref(`panen_snapshot/${todayKey}`);
+    await snapshotRef.remove();
+    console.log(`[ok] Reset snapshot panen untuk hari ${todayKey} (semua jadwal aktif selesai)`);
   } else if (hasEveningRun && !isLastScheduleOfDay) {
-    console.log(`[skip] Reset sensor ditunda — jadwal aktif sekarang bukan jadwal terakhir (order ${maxActiveOrder} dari ${sortedJadwals.length - 1})`);
+    console.log(`[skip] Reset sensor & snapshot ditunda — jadwal aktif sekarang bukan jadwal terakhir (order ${maxActiveOrder} dari ${sortedJadwals.length - 1})`);
   }
 }
 

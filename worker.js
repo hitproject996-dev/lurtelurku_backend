@@ -662,8 +662,18 @@ async function runTick() {
   console.log(`[tick] ${nowHHMM} eksekusi ${aktifSekarang.length} jadwal`);
 
   // Cari jadwal aktif dengan order tertinggi (paling akhir di hari ini)
+  // PENTING: bandingkan terhadap order maks dari SEMUA jadwal AKTIF (bukan semua jadwal termasuk nonaktif).
+  // Bug lama: jika ada penjadwalan nonaktif dengan nomor lebih besar, maka jadwal terakhir aktif
+  // tidak pernah dianggap sebagai "jadwal terakhir" sehingga reset sensor tidak pernah dieksekusi.
+  const semuaJadwalAktif = sortedJadwals.filter(([_, j]) => j && j.aktif === true);
+  const maxOrderSemuaAktif = semuaJadwalAktif.length > 0
+    ? Math.max(...semuaJadwalAktif.map(([id]) => jadwalOrderMap[id]))
+    : sortedJadwals.length - 1;
+
   const maxActiveOrder = Math.max(...aktifSekarang.map(([id]) => jadwalOrderMap[id]));
-  const isLastScheduleOfDay = maxActiveOrder === sortedJadwals.length - 1;
+  const isLastScheduleOfDay = maxActiveOrder === maxOrderSemuaAktif;
+
+  console.log(`[tick] order aktif sekarang=${maxActiveOrder}, max order semua aktif=${maxOrderSemuaAktif}, isLastSchedule=${isLastScheduleOfDay}`);
 
   let hasEveningRun = false;
 

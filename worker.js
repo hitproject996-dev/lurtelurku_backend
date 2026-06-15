@@ -141,11 +141,11 @@ function detectJenisPanen(jadwal, jadwalOrder) {
   if (jadwalOrder === 0) {
     return 'pagi';
   }
-  
+
   // Untuk jadwal ke-2+, check jam: < 12 = pagi, >= 12 = sore
   const jam = String(jadwal.jam || '09:00');
   const hour = Number(jam.split(':')[0] || 9);
-  
+
   return hour < 12 ? 'pagi' : 'sore';
 }
 
@@ -211,11 +211,11 @@ async function updateRiwayatSummary({ kandangId, kandangNama, jumlahTelur, dateK
   });
 }
 
-async function resetSensorAfterEvening(todayKey) {
-  const lockKey = 'evening_sensor_reset';
+async function resetSensorAfterEvening(todayKey, nowHHMM) {
+  const lockKey = `evening_sensor_reset_${nowHHMM.replace(':', '')}`;
   const gotLock = await acquireRunLock(todayKey, lockKey);
   if (!gotLock) {
-    console.log('[skip] Sensor reset sudah dieksekusi hari ini');
+    console.log('[skip] Sensor & snapshot reset sudah dieksekusi untuk menit ini');
     return;
   }
 
@@ -225,7 +225,9 @@ async function resetSensorAfterEvening(todayKey) {
     last_reset_by_scheduler: new Date().toISOString(),
   });
 
-  console.log('[ok] Sensor infra1/infra2 di-reset otomatis setelah jadwal sore');
+  await admin.database().ref(`panen_snapshot/${todayKey}`).remove();
+
+  console.log('[ok] Sensor infra1/infra2 dan snapshot panen di-reset otomatis setelah jadwal sore');
 }
 
 async function writeRiwayat({
@@ -381,7 +383,7 @@ async function migrateLegacyRiwayatData(kandangMap) {
       cleanupUpdates[legacyKey] = null;
       continue;
     }
- 
+
     const inferredKandangId = await inferTargetForGlobalRecord(record, kandangMap);
     if (inferredKandangId) {
       await recordsRef.push().set({
@@ -523,10 +525,10 @@ async function runForSchedule(jadwalId, jadwal, dataSensor, kandangMap, todayKey
   }
 
   for (const kandangId of targetKandangIds) {
-    const lockKey = `${jenisPanen}_${kandangId}`;
+    const lockKey = `${jenisPanen}_${kandangId}_${jam.replace(/:/g, '')}`;
     const gotLock = await acquireRunLock(todayKey, lockKey);
     if (!gotLock) {
-      console.log(`[skip] ${jadwalId}/${kandangId}: slot ${jenisPanen} sudah dieksekusi hari ini`);
+      console.log(`[skip] ${jadwalId}/${kandangId}: slot ${jenisPanen} pada jam ${jam} sudah dieksekusi hari ini`);
       continue;
     }
 
@@ -562,7 +564,7 @@ async function runForSchedule(jadwalId, jadwal, dataSensor, kandangMap, todayKey
     const pagiSnapRef = admin.database().ref(`panen_snapshot/${todayKey}/pagi/${kandangId}`);
     const pagiSnap = await pagiSnapRef.get();
     const nilaiPagi = pagiSnap.exists() ? Number(pagiSnap.val() || 0) : 0;
-    const delta = Math.max(sensorValue - nilaiPagi, 0);
+    const delta = sensorValue >= nilaiPagi ? (sensorValue - nilaiPagi) : sensorValue;
 
     await admin.database().ref(`panen_snapshot/${todayKey}/sore`).update({
       [kandangId]: sensorValue,
@@ -583,13 +585,6 @@ async function runForSchedule(jadwalId, jadwal, dataSensor, kandangMap, todayKey
     });
 
     console.log(`[ok] Sore ${kandangNama}: ${delta} telur (${sensorValue}-${nilaiPagi})`);
-  }
-
-  // Jika ini jadwal terakhir, reset snapshot untuk hari ini
-  if (jadwalOrder === totalJadwal - 1) {
-    const snapshotRef = admin.database().ref(`panen_snapshot/${todayKey}`);
-    await snapshotRef.remove();
-    console.log(`[ok] Reset snapshot panen untuk hari ${todayKey} (jadwal terakhir selesai)`);
   }
 }
 
@@ -655,7 +650,7 @@ async function runTick() {
   }
 
   if (hasEveningRun) {
-    await resetSensorAfterEvening(todayKey);
+    await resetSensorAfterEvening(todayKey, nowHHMM);
   }
 }
 

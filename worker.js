@@ -214,13 +214,13 @@ async function resetSensorAfterLastHarvest(todayKey) {
     last_reset_by_scheduler: new Date().toISOString(),
   });
 
-  // Hapus temporary snapshot data
+  // Hapus data snapshot temporary agar bersih untuk hari esok
   await admin.database().ref(`panen_snapshot/${todayKey}`).remove();
 
-  // PERUBAHAN UNTUK PENGUJIAN: Hapus lock run hari ini agar pengujian berikutnya bisa langsung dicoba ulang
+  // Bersihkan juga folder scheduler_runs hari ini supaya besok pengujian ulang bisa berjalan mulus
   await admin.database().ref(`scheduler_runs/${todayKey}`).remove();
 
-  console.log('[ok] Sensor, snapshot panen, dan lock hari ini berhasil di-reset untuk pengujian baru');
+  console.log('[ok] Sensor real-time, snapshot panen, dan lock berhasil di-reset otomatis');
 }
 
 async function writeRiwayat({
@@ -453,7 +453,6 @@ async function normalizeRecordsNode() {
   }
 
   await nestedRef.remove();
-
   console.log('[maintenance] Flattened riwayat/records/records into riwayat/records');
 }
 
@@ -478,13 +477,11 @@ async function pruneOldRiwayatRecords(maxRecords) {
   if (entries.length <= maxRecords) return;
 
   const removeUpdates = {};
-
   for (const item of entries.slice(maxRecords)) {
     removeUpdates[item.key] = null;
   }
 
   await recordsRef.update(removeUpdates);
-
   console.log(`[maintenance] Pruned ${entries.length - maxRecords} old riwayat records`);
 }
 
@@ -560,14 +557,13 @@ async function runForSchedule(jadwalId, jadwal, dataSensor, kandangMap, todayKey
   );
 
   const targetKandangIds = resolveTargetKandangIds(jadwal, kandangMap);
-
   if (targetKandangIds.length === 0) {
     console.log(`[skip] ${jadwalId}: target kandang tidak ditemukan`);
     return;
   }
 
   for (const kandangId of targetKandangIds) {
-    // PERUBAHAN UNTUK PENGUJIAN: Menambahkan string jam eksekusi ke lockKey supaya tidak bentrok saat dicoba ulang di jam berbeda
+    // Lock key menggunakan ID + Menit agar pengujian berulang di menit berbeda bisa masuk terus
     const lockKey = `${jadwalId}_${kandangId}_${jam.replace(':', '')}`;
     const gotLock = await acquireRunLock(todayKey, lockKey);
 
@@ -589,12 +585,21 @@ async function runForSchedule(jadwalId, jadwal, dataSensor, kandangMap, todayKey
 
     let jumlahTelur;
 
+    // FIX PERHITUNGAN DELTA MATEMATIKA:
     if (jadwalOrder === 0) {
+      // Panen pertama (pagi) mengambil murni nilai sensor berjalan
       jumlahTelur = sensorValue;
     } else {
-      jumlahTelur = Math.max(sensorValue - nilaiSebelumnya, 0);
+      // Panen lanjutan (sore) mengambil selisih total sensor dikurangi nilai kumulatif pagi
+      jumlahTelur = sensorValue - nilaiSebelumnya;
+      
+      // Mengatasi anomali / pengetesan manual jika sensor di-reset di tengah jalan
+      if (jumlahTelur < 0) {
+        jumlahTelur = sensorValue;
+      }
     }
 
+    // Amankan data snapshot sebelum masuk riwayat
     await updateHarvestSnapshot(
       todayKey,
       kandangId,
@@ -613,8 +618,8 @@ async function runForSchedule(jadwalId, jadwal, dataSensor, kandangMap, todayKey
       panenSebelumnya: jadwalOrder === 0 ? null : nilaiSebelumnya,
       catatan:
         jadwalOrder === 0
-          ? `Auto-capture PANEN 1/PAGI dari Railway scheduler. Sensor ${infraPath}=${sensorValue}`
-          : `Auto-capture PANEN LANJUTAN dari Railway scheduler. Delta: ${sensorValue} - ${nilaiSebelumnya}. Baseline: ${previous.source}`,
+          ? `Auto PANEN PADA ${jam}. Sensor ${infraPath}=${sensorValue}`
+          : `Auto PANEN LANJUTAN PADA ${jam}. Delta hitung: ${sensorValue} - ${nilaiSebelumnya}`,
       dateKey: todayKey,
     });
 
@@ -664,7 +669,6 @@ async function runTick() {
   }
 
   const jadwalOrderMap = {};
-
   semuaJadwalAktif.forEach(([id], index) => {
     jadwalOrderMap[id] = index;
   });
@@ -679,12 +683,13 @@ async function runTick() {
     return;
   }
 
-  const maxOrderSemuaAktif = semuaJadwalAktif.length - 1;
-  const maxActiveOrder = Math.max(...aktifSekarang.map(([id]) => jadwalOrderMap[id]));
-  const isLastScheduleOfDay = maxActiveOrder === maxOrderSemuaAktif;
+  // FIX VALIDASI RESET: Deteksi jadwal terakhir berdasarkan perbandingan Jam Menit paling akhir dalam database
+  const daftarJamAktif = semuaJadwalAktif.map(([_, j]) => String(j.jam || '').slice(0, 5)).sort();
+  const jamTerakhirHariIni = daftarJamAktif[daftarJamAktif.length - 1];
+  const isLastScheduleOfDay = nowHHMM === jamTerakhirHariIni;
 
   console.log(
-    `[tick] ${nowHHMM} eksekusi ${aktifSekarang.length} jadwal. order=${maxActiveOrder}, last=${isLastScheduleOfDay}`,
+    `[tick] ${nowHHMM} eksekusi ${aktifSekarang.length} jadwal. last_schedule_match=${isLastScheduleOfDay}`,
   );
 
   let hasHarvestRun = false;
@@ -699,17 +704,17 @@ async function runTick() {
         todayKey,
         jadwalOrderMap[jadwalId],
       );
-
       hasHarvestRun = true;
     } catch (e) {
       console.error(`[error] Jadwal ${jadwalId} gagal:`, e.message);
     }
   }
 
+  // Jika sukses eksekusi dan terbukti waktu saat ini adalah jadwal paling akhir hari ini, lakukan auto reset murni
   if (hasHarvestRun && isLastScheduleOfDay) {
     await resetSensorAfterLastHarvest(todayKey);
   } else if (hasHarvestRun && !isLastScheduleOfDay) {
-    console.log('[skip] Reset ditunda karena belum jadwal panen terakhir hari ini');
+    console.log('[skip] Reset ditunda karena masih ada jadwal aktif berikutnya nanti');
   }
 }
 
@@ -717,16 +722,9 @@ function startHealthServer() {
   const server = http.createServer((req, res) => {
     if (req.url === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(
-        JSON.stringify({
-          ok: true,
-          service: 'telurku-railway-scheduler',
-          timezone: TZ,
-        }),
-      );
+      res.end(JSON.stringify({ ok: true, service: 'telurku-railway-scheduler', timezone: TZ }));
       return;
     }
-
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('TelurKu Railway Scheduler is running');
   });
@@ -744,7 +742,6 @@ async function bootstrap() {
   const kandangMap = kandangSnap.exists() ? kandangSnap.val() : {};
 
   const runMaintenance = await shouldRunMaintenance();
-
   if (runMaintenance) {
     try {
       await migrateLegacyRiwayatData(kandangMap);
@@ -779,8 +776,6 @@ async function bootstrap() {
     async () => {
       try {
         await runTick();
-
-        // Optimasi Pembersihan data berkala otomatis setiap jam 23:59 malam
         const skr = getJakartaNow();
         if (skr.getHours() === 23 && skr.getMinutes() === 59 && COMPACT_MODE) {
           await runCompactMaintenance().catch(err => console.error('Cron maintenance error:', err.message));

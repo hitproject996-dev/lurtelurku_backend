@@ -81,6 +81,10 @@ function toDate(value) {
 }
 
 function normalizeKandangKey(kandangId, kandangNama) {
+  const name = String(kandangNama || '').toLowerCase();
+  if (name.includes('kandang 1') || name.includes('kandang1') || name.includes('kandang_1')) return 'kandang1';
+  if (name.includes('kandang 2') || name.includes('kandang2') || name.includes('kandang_2')) return 'kandang2';
+
   const rawId = String(kandangId || '').toLowerCase();
   const rawNama = String(kandangNama || '').toLowerCase();
   const merged = `${rawId} ${rawNama}`;
@@ -151,12 +155,24 @@ function detectJenisPanen(jadwal, jadwalOrder) {
 
 function resolveInfraPath(kandangId, kandangData) {
   if (kandangData && kandangData.infraPath) {
-    return String(kandangData.infraPath);
+    const path = String(kandangData.infraPath).toLowerCase();
+    if (path.includes('2')) return 'infra2';
+    if (path.includes('1')) return 'infra1';
+    return path;
+  }
+
+  if (kandangData && kandangData.nama) {
+    const nama = String(kandangData.nama).toLowerCase();
+    if (nama.includes('2') || nama.includes('dua')) return 'infra2';
+    if (nama.includes('1') || nama.includes('satu')) return 'infra1';
   }
 
   const id = String(kandangId || '').toLowerCase();
-  if (id.includes('1')) return 'infra1';
-  if (id.includes('2')) return 'infra2';
+  if (id.length < 15) {
+    if (id.includes('2')) return 'infra2';
+    if (id.includes('1')) return 'infra1';
+  }
+
   return 'infra1';
 }
 

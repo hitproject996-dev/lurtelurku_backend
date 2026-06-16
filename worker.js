@@ -255,6 +255,11 @@ async function resetSensorAfterEvening(todayKey, nowHHMM) {
     last_reset_by_scheduler: new Date().toISOString(),
   });
 
+  // PERINTAH RESET KE ESP32
+  await admin.database().ref('kontrol').update({
+    reset_counter: true
+  });
+
   await admin.database().ref(`panen_snapshot/${todayKey}`).remove();
 
   console.log('[ok] Sensor infra1/infra2 dan snapshot panen di-reset otomatis setelah jadwal sore');

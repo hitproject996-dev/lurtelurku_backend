@@ -140,17 +140,31 @@ function resolveTargetKandangIds(jadwal, kandangMap) {
 }
 
 function detectJenisPanen(jadwal, jadwalOrder) {
-  // jadwalOrder 0 = urutan pertama = PAGI
-  // jadwalOrder 1+ = urutan selanjutnya = SORE (atau sesuai jam)
+
+  // Prioritas 1: baca langsung dari Firebase
+  const tipe = String(
+    jadwal.tipeJadwal ||
+    jadwal.tipe_jadwal ||
+    jadwal.keterangan ||
+    ''
+  )
+    .toLowerCase()
+    .trim();
+
+  if (tipe.includes('pagi')) {
+    return 'pagi';
+  }
+
+  if (tipe.includes('sore')) {
+    return 'sore';
+  }
+
+  // Fallback untuk data lama
   if (jadwalOrder === 0) {
     return 'pagi';
   }
 
-  // Untuk jadwal ke-2+, check jam: < 12 = pagi, >= 12 = sore
-  const jam = String(jadwal.jam || '09:00');
-  const hour = Number(jam.split(':')[0] || 9);
-
-  return hour < 12 ? 'pagi' : 'sore';
+  return 'sore';
 }
 
 function resolveInfraPath(kandangId, kandangData) {
